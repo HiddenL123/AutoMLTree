@@ -1,0 +1,61 @@
+# AutoMLTree — batch-driven, resumable prototype
+
+An experimental binary-classification AutoML optimizer organized around four independent concepts:
+
+- **Backends** (`automl_tree/backends.py`): Optuna parameter spaces and fitted models. LightGBM is the default. XGBoost, CatBoost, spline logistic regression and GBDT-leaf logistic regression are also available through lazy imports.
+- **Study runner** (`automl_tree/studies.py`): persistent Optuna studies in SQLite, one shared CV scheme and cached OOF predictions, serialized fitted fold models.
+- **Ensemble optimizer** (`automl_tree/ensemble.py`): rank-based AUC blend, correlation constraint, beam-limited ADD / REMOVE / SWAP / multi-conflict REPLACE, and per-subset Optuna weight refinement.
+- **Public API** (`automl_tree/api.py`): train a batch, select the best available ensemble, resume studies and predict on new data.
+
+## Quick start
+
+```bash
+pip install -r requirements.txt
+python example.py
+```
+
+```python
+from automl_tree import AutoMLTree
+
+auto = AutoMLTree(work_dir='runs/ev', backends=('lgb',),
+                  n_folds=5, min_candidate_auc=.90, corr_max=.99)
+auto.fit(X_train, y_train, trials_per_family=5)
+auto.fit(X_train, y_train, trials_per_family=5)  # 5 MORE trials
+# Or auto.run_batches(X_train, y_train, n_batches=10, trials_per_family=5)
+# OR auto.fit_to_total(X_train, y_train, {'lgb': 25})
+print(auto.best_ensemble_)
+scores = auto.predict_scores(X_test)
+```
+
+Use a **unique work_dir for every dataset/fold setup**. The manifest hashes feature matrix, target labels and CV splits and refuses incompatible new data. It does not validate changes in code or preprocessing semantics; use a new `work_dir` for material changes to those too.
+
+## Resume semantics
+
+`ens.db` is kept in `work_dir`. Study names are `lgb`, `xgb`, `cat`, `lr`, `leaf_lr` so `optuna.create_study(..., load_if_exists=True)` truly resumes instead of creating duplicate studies.
+
+- `fit(..., trials_per_family=5)` always requests **5 additional trials per selected family**.
+- `fit_to_total(..., {'lgb': 25})` requests enough extra trials to reach **25 FINISHED trials** (complete, pruned or failed; unfinished running trials not counted).
+- The best ensemble is checkpointed as `best_ensemble.json` and is restored on restart.
+- `blend_<hash-of-membership>` studies are persistent and resumed whenever *that exact subset* is refined again.
+- For compatibility with old `ens.db` and `oof/<name>_<trial>.npz`, set `work_dir='.'`, `allow_legacy=True`, and **provide exactly the original `folds`** (Optuna alone does not retain fold indices). This trust switch cannot verify what data was used historically, and old `.npz` predictions do not include serialized models. Such legacy candidates can participate in selection but require their original models or refitting for `predict_scores(new_X)`.
+
+## Why deterministic alpha search before expensive Optuna blending?
+
+An AUC blend with one new candidate is a one-dimensional problem:
+
+`blend(alpha) = (1-alpha)*existing + alpha*new`.
+
+A coarse grid (with a local refinement around its best value) is cheap, reproducible, and finds candidates worth exploring without a multi-dimensional optimizer for every model. There is no guaranteed closed-form optimum based on variance/correlation for rank-based AUC: AUC changes at score-order crossings. After a batch has been evaluated, Optuna refines weights **for the selected subset only**. This follows the intent of your second idea without its per-candidate high-dimensional optimization overhead.
+
+## Important statistical and engineering limitations (V1)
+
+1. **OOF is a model-selection score, not an unbiased final generalization estimate.** The system repeatedly selects and tunes on the same folds. Assess a completed system on untouched test data or a nested outer CV loop.
+2. **Early stopping** uses an inner split within each training fold. Fitted models are refit on the whole outer-training fold with the inner-selected tree count, so outer OOF labels never influence their training or stopping iteration.
+3. **AUC rank-based ensemble:** OOF training scores are converted to ranks. For inference, each candidate prediction is mapped through its saved OOF empirical CDF. These are *not calibrated probabilities*, despite the sklearn-style `predict_proba` method name. Use `predict_scores()` for AUC.
+4. **Inputs:** V1 expects a *numeric, already-encoded* feature matrix and a binary 0/1 target. Preprocessing and feature transforms are not automatically generated yet.
+5. **Search is heuristic:** finite-width beam search and `candidate_limit` do not guarantee globally optimal subsets, even after unlimited batches. The completeness scheduler and learned experiment recommender are future features.
+6. **Performance filters:** `min_candidate_auc=None` includes every completed model. A hard threshold can miss complementary weak models. `corr_max` is a hard constraint for the search, not a statistically safe overfitting bound.
+7. **Model persistence:** after a new completed trial, all outer-fold estimators are serialized, potentially using significant disk space. Older trials from your original script have only OOF arrays; model files must be recovered or refitted before arbitrary new-data predictions.
+8. **Optuna resume:** Optuna persists trial history, not necessarily the complete sampler/pruner internal RNG state. This supports study continuation, not bit-for-bit equivalence to an uninterrupted run.
+9. **Training budget:** `fit()` currently budgets by **trial count**, not wall clock or energy. A compute-aware scheduler is a later stage.
+10. **Score optimizer:** coordinate- or joint-weight nonlinear optimization can be investigated later; the present per-membership Optuna refinement is a small-budget heuristic.
