@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import numpy as np
 import optuna
+from scipy.special import logit
 from .evaluation import ranks, fold_auc, corr_spearman
 
 
@@ -15,9 +16,12 @@ class EnsembleState:
     members: tuple[str, ...]
     weights: tuple[float, ...]
     score: float
+    mode: str = 'rank'
 
 
-def state_from(members, weights, score):
+def state_from(members, weights, score, mode='rank'):
+    if mode not in ('rank', 'probability', 'logit'):
+        raise ValueError('Unknown blending mode')
     pairs = sorted(zip(members, weights))
     if not pairs:
         raise ValueError('An ensemble must have at least one model.')
@@ -26,7 +30,7 @@ def state_from(members, weights, score):
         raise ValueError('Invalid ensemble weights.')
     w /= w.sum()
     return EnsembleState(tuple(k for k, _ in pairs), tuple(float(x) for x in w),
-                         float(score))
+                         float(score), mode)
 
 
 class EnsembleSearch:
@@ -59,24 +63,31 @@ class EnsembleSearch:
         return self.runner.load_oof(member)
 
     @lru_cache(maxsize=128)
-    def scaled(self, member):
-        return ranks(self.raw(member))
+    def scaled(self, member, mode='rank'):
+        pred = self.raw(member)
+        if mode == 'rank':
+            return ranks(pred)
+        if mode == 'probability':
+            return pred
+        if mode == 'logit':
+            return logit(np.clip(pred, 1e-6, 1.-1e-6))
+        raise ValueError(f'Unknown blending mode: {mode}')
 
     @lru_cache(maxsize=16384)
     def corr(self, a, b):
         return corr_spearman(self.raw(a), self.raw(b))
 
-    def score(self, members, weights):
+    def score(self, members, weights, mode='rank'):
         weights = np.asarray(weights, dtype=float)
         weights = weights / weights.sum()
-        blended = sum(w * self.scaled(m) for m, w in zip(members, weights))
+        blended = sum(w * self.scaled(m, mode) for m, w in zip(members, weights))
         return fold_auc(self.y, self.folds, blended)
 
     def _save(self):
         if self.best is None:
             return
         obj = {'members': list(self.best.members), 'weights': list(self.best.weights),
-               'score': self.best.score}
+               'score': self.best.score, 'mode': self.best.mode}
         tmp = self.checkpoint.with_suffix('.json.tmp')
         tmp.write_text(json.dumps(obj, indent=2))
         tmp.replace(self.checkpoint)
@@ -87,9 +98,9 @@ class EnsembleSearch:
             for name in x['members']:
                 if not self.runner.prediction_path(name).exists():
                     raise FileNotFoundError(f'Checkpoint references missing {name}')
-            s = state_from(x['members'], x['weights'], x['score'])
+            s = state_from(x['members'], x['weights'], x['score'], x.get('mode', 'rank'))
             # Check saved result really belongs to these predictions and folds.
-            if abs(self.score(s.members, s.weights) - s.score) > 1e-8:
+            if abs(self.score(s.members, s.weights, s.mode) - s.score) > 1e-8:
                 raise ValueError('Saved ensemble score does not match current data/folds.')
             if not self._legal(s.members):
                 raise ValueError('Saved ensemble violates current corr_max. '
@@ -97,7 +108,7 @@ class EnsembleSearch:
             self.best = s
 
     def _register(self, state):
-        key = state.members
+        key = (state.members, state.mode)
         old = self.visited.get(key)
         if old is None or state.score > old.score + 1e-12:
             self.visited[key] = state
@@ -116,12 +127,12 @@ class EnsembleSearch:
         if not self._legal(survivors + [newcomer]):
             return None
         if not survivors:
-            return state_from([newcomer], [1], self.score([newcomer], [1]))
+            return state_from([newcomer], [1], self.score([newcomer], [1], parent.mode), parent.mode)
         pw = np.array([w for m, w in zip(parent.members, parent.weights)
                        if m not in remove])
         pw /= pw.sum()
-        base = sum(w * self.scaled(m) for m, w in zip(survivors, pw))
-        cand = self.scaled(newcomer)
+        base = sum(w * self.scaled(m, parent.mode) for m, w in zip(survivors, pw))
+        cand = self.scaled(newcomer, parent.mode)
         result = None
         tested = set()
 
@@ -135,7 +146,7 @@ class EnsembleSearch:
                 value = fold_auc(self.y, self.folds, blend)
                 if current is None or value > current.score:
                     current = state_from(survivors+[newcomer],
-                                         list((1-alpha)*pw)+[alpha], value)
+                                         list((1-alpha)*pw)+[alpha], value, parent.mode)
             return current
 
         result = evaluate_alphas(self.alpha_grid, result)
@@ -153,7 +164,7 @@ class EnsembleSearch:
         if not names:
             return None
         weights = [w for m, w in zip(parent.members, parent.weights) if m != discarded]
-        return state_from(names, weights, self.score(names, weights))
+        return state_from(names, weights, self.score(names, weights, parent.mode), parent.mode)
 
     def _neighbors(self, state, candidates):
         generated = []
@@ -200,25 +211,52 @@ class EnsembleSearch:
             new = {}
             for parent in beam:
                 for state in self._neighbors(parent, ranked):
-                    key = state.members
+                    key = (state.members, state.mode)
                     if key not in new or state.score > new[key].score:
                         new[key] = state
             for state in new.values():
                 self._register(state)
             # Keep some alternative subsets even when they temporarily score worse.
-            beam = sorted({**{s.members: s for s in beam}, **new}.values(),
+            beam = sorted({**{(s.members, s.mode): s for s in beam}, **new}.values(),
                           key=lambda s: -s.score)[:self.beam_width]
             if not beam:
                 break
         return self.best
 
-    def refine_weights(self, additional_trials=30, seed=42):
-        """Resume a SEPARATE Optuna blend study for the exact current subset."""
-        if self.best is None or len(self.best.members) <= 1 or additional_trials <= 0:
+    def estimate_counterfactual_gain(self, member, reference):
+        """Measure candidate reward against FROZEN pre-batch ensemble."""
+        if reference is None:
+            return max(0., self.score([member], [1]) - .5)
+        if member in reference.members:
+            return 0.
+        conflicts = [m for m in reference.members
+                     if self.corr(m, member) >= self.corr_max]
+        state = self._add_best_alpha(reference, member, remove=conflicts)
+        return max(0., state.score-reference.score) if state is not None else 0.
+
+    def compare_blend_modes(self, modes=('rank', 'probability', 'logit'),
+                            trials_per_mode=3, seed=42):
+        """Cheap combination experiments using cached OOF predictions only."""
+        if self.best is None or len(self.best.members) <= 1:
             return self.best
-        start = self.best
+        reference = self.best
+        for mode in modes:
+            state = state_from(reference.members, reference.weights,
+                               self.score(reference.members, reference.weights, mode),
+                               mode)
+            self._register(state)
+            if trials_per_mode:
+                self.refine_weights(trials_per_mode, seed=seed, base_state=state)
+        return self.best
+
+    def refine_weights(self, additional_trials=30, seed=42, base_state=None):
+        """Resume an Optuna blend study for each (mode, membership) pair."""
+        start = base_state or self.best
+        if start is None or len(start.members) <= 1 or additional_trials <= 0:
+            return self.best
         members = start.members
-        key = hashlib.sha256('|'.join(members).encode()).hexdigest()[:16]
+        # Preserve the original rank blend study name for existing users.
+        key = hashlib.sha256((start.mode + ':' + '|'.join(members)).encode()).hexdigest()[:16]
         study = optuna.create_study(
             direction='maximize', study_name=f'blend_{key}',
             storage=self.runner.storage, load_if_exists=True,
@@ -231,11 +269,10 @@ class EnsembleSearch:
                           for i in range(len(members))], dtype=float)
             if w.sum() < 1e-9:
                 raise optuna.TrialPruned()
-            return self.score(members, w)
+            return self.score(members, w, start.mode)
 
         study.optimize(objective, n_trials=int(additional_trials))
         if study.best_value > start.score + self.min_gain:
             w = [study.best_params[f'w{i}'] for i in range(len(members))]
-            updated = state_from(members, w, study.best_value)
-            self._register(updated)
+            self._register(state_from(members, w, study.best_value, start.mode))
         return self.best

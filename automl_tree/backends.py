@@ -36,6 +36,14 @@ def _inner_split(train_indices, y, seed):
 
 def fit_lgb(X, y, tr, params, seed, early_stop):
     import lightgbm as lgb
+    boosting = params.get('boosting_type', 'gbdt')
+    # DART does not support ordinary early stopping; RF uses bounded rounds too.
+    if boosting in ('dart', 'rf'):
+        rounds = 200 if boosting == 'dart' else 180
+        model = lgb.LGBMClassifier(n_estimators=rounds, metric='auc',
+                                  random_state=seed, verbosity=-1, **params)
+        model.fit(X[tr], y[tr])
+        return model, rounds
     a, b = _inner_split(tr, y, seed)
     inner = lgb.LGBMClassifier(n_estimators=2000, metric='auc', random_state=seed,
                               verbosity=-1, **params)
@@ -151,6 +159,16 @@ def fit_leaf(X, y, tr, params, seed, early_stop):
     lr.fit(model._features(X[tr]), y[tr])
     model.lr = lr
     return model, 0
+
+
+class FeatureMaskModel:
+    """Serializable adapter accepting full features for a subset-trained model."""
+    def __init__(self, model, columns):
+        self.model = model
+        self.columns = np.asarray(columns, dtype=np.int64)
+
+    def predict_proba(self, X):
+        return self.model.predict_proba(X[:, self.columns])
 
 
 REGISTRY = {
