@@ -82,3 +82,36 @@ A coarse grid (with a local refinement around its best value) is cheap, reproduc
 8. **Optuna resume:** Optuna persists trial history, not necessarily the complete sampler/pruner internal RNG state. This supports study continuation, not bit-for-bit equivalence to an uninterrupted run.
 9. **Training budget:** `fit()` currently budgets by **trial count**, not wall clock or energy. A compute-aware scheduler is a later stage.
 10. **Score optimizer:** coordinate- or joint-weight nonlinear optimization can be investigated later; the present per-membership Optuna refinement is a small-budget heuristic.
+
+
+## Kaggle Playground Series S6E10: original AutoML baseline
+
+Place competition files in the repository root as:
+
+```text
+playground-series-s6e10/
+    train.csv
+    test.csv
+    sample_submission.csv  # optional; submission writer uses test IDs if missing
+```
+
+Run the **original multi-model Optuna search** (not the adaptive experiment scheduler):
+
+```bash
+python kaggle_s6e10_train.py --quick --families lgb
+python kaggle_s6e10_train.py --families lgb xgb cat lr leaf_lr --trials 10
+# Or train to a lifetime total without repeating completed trials:
+python kaggle_s6e10_train.py --to-total --families lgb --trials 30
+```
+
+Without `--quick` or `--trials`, the runner uses the previous per-family allocations (40 LR, 30 leaf LR, 80 LGB, 80 XGB, 40 CatBoost trials) **per invocation**. XGBoost and CatBoost are optional dependencies; install them separately when selecting those families. Additional runs using the same data and work directory resume existing Optuna studies. The working directory defaults to `runs/s6e10_baseline/`. Unlike the old script, the `id` column is not treated as a predictor and a candidate AUC cutoff is optional (`--min-candidate-auc 0.95` reproduces the old filter).
+
+Generate `submission.csv` from the **saved best ensemble without retraining**:
+
+```bash
+python kaggle_s6e10_submit.py
+# Alternative input and output directories:
+python kaggle_s6e10_submit.py --data-dir playground-series-s6e10 --output my_submission.csv
+```
+
+Both entry points reuse `kaggle_s6e10_data.py` for deterministic categorical encoding and the original stratified development/holdout split (80/20, split seed 0). Prediction scores are suitable for AUC but are not calibrated probabilities. The holdout is reported as a diagnostic, not used to choose members. If a dataset or preprocessing changes, use a fresh work directory; the dataset fingerprint prevents accidental mixing.
