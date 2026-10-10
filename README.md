@@ -115,3 +115,44 @@ python kaggle_s6e10_submit.py --data-dir playground-series-s6e10 --output my_sub
 ```
 
 Both entry points reuse `kaggle_s6e10_data.py` for deterministic categorical encoding and the original stratified development/holdout split (80/20, split seed 0). Prediction scores are suitable for AUC but are not calibrated probabilities. The holdout is reported as a diagnostic, not used to choose members. If a dataset or preprocessing changes, use a fresh work directory; the dataset fingerprint prevents accidental mixing.
+
+
+## Kaggle S6E10: CSV training and submission (original strategy)
+
+Put the competition files in the repository's local \`playground-series-s6e10/\` folder:
+
+- \`train.csv\`
+- \`test.csv\`
+- \`sample_submission.csv\` (optional; if absent, \`id,satisfaction\` is created)
+
+These files are not required for the package's unit tests.
+
+Run the **original Optuna model-generation + ensemble-selection** workflow (not the adaptive experiment scheduler):
+
+\`\`\`bash
+python example_competition.py
+\`\`\`
+
+This trains five *additional* LightGBM trials by default, saves the studies under \`runs/s6e10/\`, and prints an untouched holdout AUC diagnostic. Repeat the command to add five more trials and retain existing models and ensemble checkpoints. Or select all previous model families:
+
+\`\`\`bash
+python example_competition.py --backends lr leaf_lr lgb xgb cat --trials 5
+\`\`\`
+
+For the original per-family lifetime trial targets (LR 40, leaf LR 30, LGB 80, XGB 80, CatBoost 40), use:
+
+\`\`\`bash
+python example_competition.py --backends lr leaf_lr lgb xgb cat --full
+\`\`\`
+
+The \`--full\` option resumes existing studies **up to** those totals, rather than adding the totals on every invocation. XGBoost and CatBoost require their optional Python packages. The original AUC cutoff of 0.95 can be restored with \`--min-candidate-auc 0.95\`; the runner defaults to no hard cutoff to retain potentially complementary models.
+
+Generate a submission from the **already saved ensemble**, without training again:
+
+\`\`\`bash
+python predict_submission.py
+\`\`\`
+
+This writes \`submission.csv\` with the target column \`satisfaction\`. You can use \`--data-dir\`, \`--work-dir\`, and \`--output\` to override the default paths. The submission-only script rereads \`train.csv\` to restore the original development folds and rank reference; keep the training CSV and preprocessing consistent. The \`id\` column is not used as a predictive feature. The prediction values are AUC discrimination scores, not calibrated probabilities.
+
+Selection CV AUC is **not** an unbiased generalization estimate after repeated ensemble selection. Do not use the holdout score to repeatedly tune the experiment policy.
