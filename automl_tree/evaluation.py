@@ -71,6 +71,9 @@ def rank_new(new_predictions, reference_oof):
 
 
 def corr_spearman(a, b):
+    a, b = np.asarray(a), np.asarray(b)
+    if len(a) < 2 or np.all(a == a[0]) or np.all(b == b[0]):
+        return 1.0
     c = float(spearmanr(a, b).statistic)
     return c if np.isfinite(c) else 1.0   # constant vectors are conservatively redundant
 

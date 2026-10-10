@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "automl-tree-prototype"
+version = "0.2.0"
+description = "Resumable, operator-driven tabular AutoML and ensemble search prototype"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.26", "scipy>=1.11", "scikit-learn>=1.4",
+                "optuna>=3.6", "lightgbm>=4.3", "joblib>=1.3"]
+
+[project.optional-dependencies]
+additional-backends = ["xgboost>=2.0", "catboost>=1.2"]
+test = ["pytest>=7"]
+
+[tool.setuptools.packages.find]
+include = ["automl_tree*"]

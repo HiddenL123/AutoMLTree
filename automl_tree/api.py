@@ -7,6 +7,7 @@ from .backends import REGISTRY
 from .evaluation import numeric_array, prepare_folds, ensure_manifest, rank_new
 from .studies import StudyRunner
 from .ensemble import EnsembleSearch
+from .scheduler import ExperimentScheduler
 
 
 class AutoMLTree:
@@ -31,6 +32,7 @@ class AutoMLTree:
         self.studies = {}
         self.runner = None
         self.ensemble = None
+        self.scheduler = None
 
     def initialize(self, X, y, folds=None):
         """Bind data to a persistent run, validating the dataset/fold fingerprint."""
@@ -45,6 +47,7 @@ class AutoMLTree:
                                        search_depth=self.search_depth,
                                        candidate_limit=self.candidate_limit,
                                        min_gain=self.min_member_gain)
+        self.scheduler = ExperimentScheduler(self.work_dir, verbose=self.verbose)
         return self
 
     def fit(self, X, y, trials_per_family=5, folds=None):
@@ -68,6 +71,65 @@ class AutoMLTree:
                   if isinstance(trials_per_family, int) else dict(trials_per_family))
         self.studies = self.runner.run_batch(counts)
         return self.select_ensemble()
+
+    def fit_scheduled(self, X, y, batch_size=5, folds=None,
+                      blend_trials_per_mode=3):
+        """Run a recommended batch; evaluate and checkpoint its ensemble."""
+        if self.runner is None:
+            self.initialize(X, y, folds)
+        else:
+            XX, yy, ff = prepare_folds(X, y, self.seed, self.n_folds, folds)
+            ensure_manifest(self.work_dir, XX, yy, ff, allow_legacy=self.allow_legacy)
+        if batch_size < 0:
+            raise ValueError('batch_size must be nonnegative')
+        previous_best = self.ensemble.best
+        plan = self.scheduler.plan_batch(
+            self.backends, batch_size,
+            allow_ablation=(self.runner.feature_importances() is not None)
+            if 'lgb' in self.backends else False)
+        self.studies, outcomes = self.runner.run_experiment_batch(plan)
+        for action, trial, member in outcomes:
+            import optuna
+            if (trial.state == optuna.trial.TrialState.COMPLETE
+                    and self.runner.prediction_path(member).exists()):
+                gain = self.ensemble.estimate_counterfactual_gain(member, previous_best)
+            else:
+                gain = 0.
+            self.scheduler.record(
+                member, action, gain,
+                trial.user_attrs.get('training_seconds', 0.),
+                auc=trial.value,
+                baseline_auc=previous_best.score if previous_best else .5)
+        candidates = self.runner.candidates(self.backends, self.min_candidate_auc)
+        if candidates:
+            self.ensemble.search_batch(candidates)
+            self.ensemble.compare_blend_modes(trials_per_mode=blend_trials_per_mode,
+                                              seed=self.seed)
+            self.ensemble.refine_weights(self.blend_trials_per_batch, seed=self.seed)
+        if self.verbose:
+            print('[scheduler] planned:', ', '.join(self.scheduler.label(a) for a in plan))
+            if self.ensemble.best is not None:
+                print(f'[scheduler] best AUC {self.ensemble.best.score:.6f}, '
+                      f'mode {self.ensemble.best.mode}, '
+                      f'members {len(self.ensemble.best.members)}')
+        return self
+
+    def run_scheduled_batches(self, X, y, n_batches, batch_size=5, folds=None,
+                              max_seconds=None, blend_trials_per_mode=3):
+        """Run bounded scheduled batches synchronously; restart to resume."""
+        start = time.monotonic()
+        for _ in range(n_batches):
+            if max_seconds is not None and time.monotonic()-start >= max_seconds:
+                break
+            self.fit_scheduled(X, y, batch_size=batch_size, folds=folds,
+                               blend_trials_per_mode=blend_trials_per_mode)
+        return self
+
+    @property
+    def experiment_summary_(self):
+        if self.scheduler is None:
+            raise RuntimeError('Initialize first')
+        return self.scheduler.summary()
 
     def run_batches(self, X, y, n_batches, trials_per_family=5, folds=None,
                     max_seconds=None):
@@ -123,21 +185,28 @@ class AutoMLTree:
         return self.ensemble.best
 
     def predict_proba(self, X):
-        """Binary classification predictions; stable OOF-ECDF rank ensemble.
-
-        These scores optimize discrimination/AUC, not calibrated probabilities.
-        """
+        """Discrimination scores compatible with sklearn shape, NOT calibrated."""
         X = numeric_array(X)
         if X.shape[1] != self.runner.X.shape[1]:
             raise ValueError('Feature count differs from training data.')
         state = self.best_ensemble_
         score = np.zeros(len(X), dtype=float)
+        from scipy.special import expit, logit
         for member, weight in zip(state.members, state.weights):
             raw = self.runner.predict_member(member, X)
-            oof = self.runner.load_oof(member)
-            score += weight * rank_new(raw, oof)
-        # Rank scores are not calibrated probability estimates.
-        return np.column_stack((1 - np.clip(score, 0, 1), np.clip(score, 0, 1)))
+            if state.mode == 'rank':
+                transformed = rank_new(raw, self.runner.load_oof(member))
+            elif state.mode == 'probability':
+                transformed = raw
+            elif state.mode == 'logit':
+                transformed = logit(np.clip(raw, 1e-6, 1.-1e-6))
+            else:
+                raise ValueError(f'Unknown blending mode: {state.mode}')
+            score += weight * transformed
+        if state.mode == 'logit':
+            score = expit(score)
+        score = np.clip(score, 0., 1.)
+        return np.column_stack((1.-score, score))
 
     def predict_scores(self, X):
         return self.predict_proba(X)[:, 1]

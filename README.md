@@ -1,3 +1,26 @@
+# AutoMLTree — Experiment Scheduler (V2)
+
+Current version supports a **resumable, LLM-free experiment scheduler** that selects LightGBM standard GBDT, DART, random-forest mode, extra-trees, feature-subset training, or top-feature ablation. After each batch, ensemble search evaluates additions, removals and replacements, then compares rank, probability and logit blending.
+
+## Start scheduled training
+
+```python
+from automl_tree import AutoMLTree
+
+auto = AutoMLTree(work_dir="runs/ev", backends=("lgb",), n_folds=5)
+auto.fit_scheduled(X_train, y_train, batch_size=5)
+auto.fit_scheduled(X_train, y_train, batch_size=5)  # 5 more trials
+print(auto.experiment_summary_)
+print(auto.best_ensemble_)
+scores = auto.predict_scores(X_test)
+```
+
+Run the example with `python example_scheduler.py`. All Optuna studies, ensemble checkpoints and scheduler rewards persist across runs. The scheduler learns operator-level rewards from marginal ensemble AUC gain adjusted for training time. It is a heuristic UCB policy, not yet cross-dataset meta-learning. CV ensemble-selection scores are subject to selection overfitting; confirm on untouched holdout data. `predict_scores()` returns discrimination scores, not calibrated probabilities.
+
+**The earlier V1 documentation follows below for compatibility.** Some descriptions of future scheduler work below are superseded by the V2 notes above.
+
+---
+
 # AutoMLTree — batch-driven, resumable prototype
 
 An experimental binary-classification AutoML optimizer organized around four independent concepts:
