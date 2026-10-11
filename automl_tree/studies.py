@@ -230,15 +230,28 @@ class StudyRunner:
             raise ValueError(f'{member}: OOF shape/values mismatch')
         return result
 
-    def predict_member(self, member, X):
-        preds = []
-        for fold in range(len(self.folds)):
-            path = self.model_path(member, fold)
-            if not path.exists():
-                raise FileNotFoundError(
-                    f'Missing fitted model {path}. Older studies may have OOF predictions '
-                    'but no serialized fold models. Those models must be refitted for '
-                    'arbitrary new-data inference.')
-            model = joblib.load(path)
-            preds.append(predict_positive(model, X))
-        return np.mean(preds, axis=0)
+    def predict_member(self, member, X, prediction_set=None):
+        """Predict with saved estimators or a verified named prediction cache.
+
+        Prediction-only candidates are normal Optuna study candidates for
+        ensemble selection, but can only be used on their stored hold/test
+        datasets. They do not claim to support arbitrary new inputs.
+        """
+        paths = [self.model_path(member, fold) for fold in range(len(self.folds))]
+        if all(path.exists() for path in paths):
+            return np.mean([predict_positive(joblib.load(path), X) for path in paths], axis=0)
+        if prediction_set not in ('hold', 'test'):
+            raise FileNotFoundError(
+                f'{member} has no serialized fitted fold models. For cached-only '
+                "members pass prediction_set='hold' or prediction_set='test'."
+            )
+        from .evaluation import array_fingerprint
+        with np.load(self.prediction_path(member), allow_pickle=False) as stored:
+            if prediction_set not in stored.files or prediction_set + '_hash' not in stored.files:
+                raise FileNotFoundError(f'{member}: no cached predictions for {prediction_set}')
+            if str(stored[prediction_set + '_hash'].item()) != array_fingerprint(X):
+                raise ValueError(f'{member}: {prediction_set} data fingerprint mismatch')
+            predictions = np.asarray(stored[prediction_set], dtype=float)
+        if predictions.shape != (len(X),) or not np.isfinite(predictions).all():
+            raise ValueError(f'{member}: invalid cached predictions')
+        return predictions

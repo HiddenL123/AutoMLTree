@@ -98,3 +98,13 @@ def ensure_manifest(work_dir: Path, X, y, folds, allow_legacy=False):
                              'pass allow_legacy=True ONLY if the dataset and folds match.')
     path.write_text(json.dumps({'fingerprint': fp, 'rows': len(y),
                                 'features': X.shape[1], 'n_folds': len(folds)}, indent=2))
+
+
+def array_fingerprint(X):
+    """Hash an exact input matrix to validate cached-only inference."""
+    X = numeric_array(X)
+    h = hashlib.sha256()
+    h.update(str(X.shape).encode())
+    h.update(X.dtype.str.encode())
+    h.update(np.ascontiguousarray(X).tobytes())
+    return h.hexdigest()

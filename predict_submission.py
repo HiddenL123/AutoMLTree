@@ -37,7 +37,7 @@ def create_submission(data_dir="playground-series-s6e10",
     )
     # Restores and validates saved ensemble. This does NOT fit any models.
     auto.initialize(data.X_dev, data.y_dev)
-    predictions = auto.predict_scores(data.X_test)
+    predictions = auto.predict_scores(data.X_test, prediction_set='test')
     if predictions.shape != (len(data.test_ids),) or not np.isfinite(predictions).all():
         raise ValueError("Missing, nonfinite or misaligned test predictions")
     if np.any((predictions < 0) | (predictions > 1)):
@@ -59,7 +59,7 @@ def create_submission(data_dir="playground-series-s6e10",
     print(f"Saved {len(sub):,} predictions to {destination}")
     print(f"Selected ensemble CV AUC: {auto.best_ensemble_.score:.6f}")
     print(f"Holdout AUC (diagnostic only): "
-          f"{roc_auc_score(data.y_holdout, auto.predict_scores(data.X_holdout)):.6f}")
+          f"{roc_auc_score(data.y_holdout, auto.predict_scores(data.X_holdout, prediction_set='hold')):.6f}")
     return destination
 
 

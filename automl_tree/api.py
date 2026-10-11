@@ -184,7 +184,7 @@ class AutoMLTree:
             raise RuntimeError('No ensemble available. Run fit first.')
         return self.ensemble.best
 
-    def predict_proba(self, X):
+    def predict_proba(self, X, prediction_set=None):
         """Discrimination scores compatible with sklearn shape, NOT calibrated."""
         X = numeric_array(X)
         if X.shape[1] != self.runner.X.shape[1]:
@@ -193,7 +193,7 @@ class AutoMLTree:
         score = np.zeros(len(X), dtype=float)
         from scipy.special import expit, logit
         for member, weight in zip(state.members, state.weights):
-            raw = self.runner.predict_member(member, X)
+            raw = self.runner.predict_member(member, X, prediction_set=prediction_set)
             if state.mode == 'rank':
                 transformed = rank_new(raw, self.runner.load_oof(member))
             elif state.mode == 'probability':
@@ -208,9 +208,9 @@ class AutoMLTree:
         score = np.clip(score, 0., 1.)
         return np.column_stack((1.-score, score))
 
-    def predict_scores(self, X):
-        return self.predict_proba(X)[:, 1]
+    def predict_scores(self, X, prediction_set=None):
+        return self.predict_proba(X, prediction_set=prediction_set)[:, 1]
 
-    def predict(self, X, threshold=.5):
+    def predict(self, X, threshold=.5, prediction_set=None):
         """Threshold rank scores. For calibrated probabilities, add calibration separately."""
-        return (self.predict_scores(X) >= threshold).astype(int)
+        return (self.predict_scores(X, prediction_set=prediction_set) >= threshold).astype(int)
