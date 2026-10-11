@@ -18,7 +18,7 @@ from sklearn.metrics import roc_auc_score
 from automl_tree import AutoMLTree
 from kaggle_s6e10_data import DATA_DIR, RUN_DIR, SEED, N_FOLDS, load_s6e10
 
-ORIGINAL_TRIALS = {"lr": 40, "leaf_lr": 30, "lgb": 80, "xgb": 80, "cat": 40}
+ORIGINAL_TRIALS = {"lr": 5, "leaf_lr": 5, "lgb": 10, "xgb": 10, "cat": 5}
 
 
 def main() -> None:
