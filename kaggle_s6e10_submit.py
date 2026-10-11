@@ -32,12 +32,12 @@ def main() -> None:
     auto = AutoMLTree(work_dir=args.work_dir, backends=("lgb",),
                       n_folds=N_FOLDS, seed=SEED, corr_max=args.corr_max)
     auto.initialize(data.X_dev, data.y_dev)
-    scores = auto.predict_scores(data.X_test)
+    scores = auto.predict_scores(data.X_test, prediction_set='test')
     submission = make_submission(data, scores)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     submission.to_csv(args.output, index=False)
 
-    holdout_auc = roc_auc_score(data.y_holdout, auto.predict_scores(data.X_holdout))
+    holdout_auc = roc_auc_score(data.y_holdout, auto.predict_scores(data.X_holdout, prediction_set='hold'))
     print(f"Restored {len(auto.best_ensemble_.members)} models; CV AUC "
           f"{auto.best_ensemble_.score:.7f}; holdout AUC {holdout_auc:.7f}")
     print(f"Wrote {len(submission):,} rows to {args.output}")

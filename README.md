@@ -156,3 +156,36 @@ python predict_submission.py
 This writes `submission.csv` with the target column `satisfaction`. You can use `--data-dir`, `--work-dir`, and `--output` to override the default paths. The submission-only script rereads `train.csv` to restore the original development folds and rank reference; keep the training CSV and preprocessing consistent. The `id` column is not used as a predictive feature. The prediction values are AUC discrimination scores, not calibrated probabilities.
 
 Selection CV AUC is **not** an unbiased generalization estimate after repeated ensemble selection. Do not use the holdout score to repeatedly tune the experiment policy.
+
+
+## Convert older Optuna trials once, then retire old files
+
+The previous competition script saved \`ens.db\` plus \`oof/<family>_<trial>.npz\` files containing OOF, holdout and Kaggle test predictions. These are **predictions**, not serialized estimators. To avoid an ongoing legacy adapter, import their completed trials directly into the current run's native Optuna database and OOF folder.
+
+Place your existing files locally at:
+
+\`\`\`text
+legacy/ens.db
+legacy/oof/lgb_0.npz
+legacy/oof/xgb_0.npz
+...
+\`\`\`
+
+Run from the repository root:
+
+\`\`\`bash
+python convert_previous_models.py --source legacy --dry-run
+python convert_previous_models.py --source legacy --work-dir runs/s6e10
+\`\`\`
+
+For the *other* Kaggle runner (\`kaggle_s6e10_train.py\`, which defaults to \`runs/s6e10_baseline\`), use:
+
+\`\`\`bash
+python convert_previous_models.py --source legacy --loader kaggle --work-dir runs/s6e10_baseline
+\`\`\`
+
+The converter checks OOF dimensions and regenerates original fold AUCs using the current labels/fold indices, refusing inconsistent data. It cannot independently prove holdout/test ordering from prediction arrays; keep your original Kaggle CSV row order and the original split (80/20, split seed 0). Migrated trials get new non-colliding Optuna trial numbers and preserve original parameters, scores, and metadata. Rerunning conversion skips previously converted candidates. **Never directly overwrite the current run's \`ens.db\` with your old database.**
+
+After conversion, new trials and imported trials participate in the **same** model/ensemble pool. No legacy-specific runner is required. Saved predictions for imported members are available only for the original known \`hold\` and \`test\` datasets and are checked against exact input feature fingerprints. On those splits the submission scripts now pass \`prediction_set='hold'\` / \`'test'\`; on arbitrary new rows, imported candidates cannot be used unless the original fitted models are recovered. Existing native trained estimators still support arbitrary new rows.
+
+The default migration selects and checkpoints an initial ensemble without training new models. You can omit the initial selection with \`--no-select\`. The original source directory can be archived after verifying the resulting submission.

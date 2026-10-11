@@ -72,7 +72,7 @@ def run(args):
     except RuntimeError:
         print("No eligible ensemble yet. Try more trials or reduce --min-candidate-auc.")
         return
-    holdout = auto.predict_scores(data.X_holdout)
+    holdout = auto.predict_scores(data.X_holdout, prediction_set='hold')
     print(f"Best selection CV AUC: {state.score:.6f}")
     print(f"Holdout AUC: {roc_auc_score(data.y_holdout, holdout):.6f}")
     print("Members:")

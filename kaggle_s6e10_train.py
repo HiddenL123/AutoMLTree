@@ -65,7 +65,7 @@ def main() -> None:
         auto.fit(data.X_dev, data.y_dev, trials_per_family=counts)
 
     best = auto.best_ensemble_
-    holdout_auc = roc_auc_score(data.y_holdout, auto.predict_scores(data.X_holdout))
+    holdout_auc = roc_auc_score(data.y_holdout, auto.predict_scores(data.X_holdout, prediction_set='hold'))
     print(f"Best selection CV AUC: {best.score:.7f} | untouched holdout AUC: {holdout_auc:.7f}")
     print(f"Blend mode: {best.mode}; selected members: {len(best.members)}")
     print("Models and weights:")
